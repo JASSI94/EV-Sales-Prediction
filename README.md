@@ -1,170 +1,87 @@
-import os
-import subprocess
-import time
-from threading import Thread
-from flask import (
-    Flask, render_template, request, redirect,
-    url_for, flash, Response
-)
 import pandas as pd
+import numpy as np
+import os
 import joblib
-from werkzeug.utils import secure_filename
+import matplotlib.pyplot as plt
+import seaborn as sns
+import time
+
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
+
+from sklearn.model_selection import train_test_split
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+
+from matplotlib.backends.backend_pdf import PdfPages
 from graphs import generate_graphs
 
-# ─── Flask configuration ────────────────────────────────────────────────────────
-app = Flask(__name__)
-app.secret_key = 'supersecretkey'  # Secret key for session management
-app.config['UPLOAD_FOLDER'] = 'data/'
-ALLOWED_EXTENSIONS = {'csv'}
+# Load data
+df = pd.read_csv('data/ev_sales_india.csv')
 
-# ─── Load model & dropdown data ─────────────────────────────────────────────────
-model         = joblib.load('model/model.pkl')
-features      = joblib.load('model/features.pkl')
-dropdown_data = joblib.load('model/dropdown_data.pkl')
+# Parse date
+df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
 
-# ─── Global training progress tracker ───────────────────────────────────────────
-training_progress = {'percent': 0}
+# Handle missing values safely
+df['EV_Sales_Quantity'] = df['EV_Sales_Quantity'].fillna(df['EV_Sales_Quantity'].median())
+df = df.fillna(df.mode().iloc[0])
 
-def allowed_file(filename):
-    return (
-        '.' in filename and
-        filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
-    )
+# Feature engineering
+df['Month'] = df['Date'].dt.month
+df['Day'] = df['Date'].dt.day
 
-# ─── Background training function ───────────────────────────────────────────────
-def train_background():
-    training_progress['percent'] = 0  # Reset progress
+df_original = df.copy()
 
-    proc = subprocess.Popen(
-        ['python', 'train_model.py'],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1
-    )
+# Save dropdown values BEFORE encoding
+os.makedirs('model', exist_ok=True)
+dropdown_data = {
+    'State': sorted(df['State'].dropna().unique()),
+    'Vehicle_Class': sorted(df['Vehicle_Class'].dropna().unique()),
+    'Vehicle_Category': sorted(df['Vehicle_Category'].dropna().unique()),
+    'Vehicle_Type': sorted(df['Vehicle_Type'].dropna().unique())
+}
+joblib.dump(dropdown_data, 'model/dropdown_data.pkl')
+print("Dropdown data saved.")
 
-    for line in proc.stdout:
-        print(line.strip())  # Log output
-        if line.startswith('PROGRESS:'):
-            try:
-                progress = int(line.strip().split(':')[1])
-                training_progress['percent'] = progress
-                print(f"Progress updated: {progress}%")  # Debug line
-            except ValueError:
-                pass
+# Drop if 'Month_Name' column exists
+if 'Month_Name' in df.columns:
+    df.drop('Month_Name', axis=1, inplace=True)
 
-    proc.wait()
-    training_progress['percent'] = 100  # Complete
-    print("Training complete.")  # Debug line
+# Encode categorical features
+df = pd.get_dummies(df, columns=['State', 'Vehicle_Class', 'Vehicle_Category', 'Vehicle_Type'], drop_first=True)
 
-# ─── Routes ─────────────────────────────────────────────────────────────────────
+# Drop original date column
+df.drop(['Date'], axis=1, inplace=True)
 
-@app.route('/')
-def root():
-    return redirect(url_for('dashboard'))
+# Define features and target
+X = df.drop('EV_Sales_Quantity', axis=1)
+y = df['EV_Sales_Quantity']
 
-@app.route('/dashboard', methods=['GET', 'POST'])
-def dashboard():
-    if request.method == 'POST':
-        # Handle file upload
-        if 'csv_file' in request.files and request.files['csv_file']:
-            file = request.files['csv_file']
-            if file and allowed_file(file.filename):
-                filename  = secure_filename(file.filename)
-                save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-                file.save(save_path)
-                flash(f"📁 Uploaded '{filename}' successfully.", 'success')
-            else:
-                flash("❗ Please upload a valid .csv file.", 'danger')
-                return redirect(url_for('dashboard'))
+# Split dataset
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
 
-        # Handle training trigger
-        if request.form.get('action') == 'train':
-            Thread(target=train_background, daemon=True).start()
-            flash("🚀 Training started! Watch progress below.", 'success')
+# Train model with progress reporting
+model = RandomForestRegressor(n_estimators=100, random_state=42)
+n_estimators = model.n_estimators
 
-    return render_template('dashboard.html', dropdown_data=dropdown_data)
+# Split into 10 parts to simulate progress
+batch_size = n_estimators // 10
+for i in range(1, 11):  # 10 steps
+    model.set_params(n_estimators=batch_size * i)  # Increase n_estimators gradually
+    model.fit(X_train, y_train)  # Train model
+    progress = (i * 10)  # Calculate percentage progress
+    print(f"PROGRESS:{progress}", flush=True)  # Send progress to Flask app
 
-@app.route('/train_progress')
-def train_progress():
-    def event_stream():
-        last_sent = -1
-        while True:
-            progress = training_progress.get('percent', 0)
-            if progress != last_sent:
-                last_sent = progress
-                yield f"data:{progress}\n\n"
-            if last_sent >= 100:
-                break
-            time.sleep(0.2)
-    return Response(event_stream(), mimetype='text/event-stream')
+# Final evaluation
+y_pred = model.predict(X_test)
+mse = mean_squared_error(y_test, y_pred)
+r2 = r2_score(y_test, y_pred)
 
-@app.route('/predict', methods=['GET', 'POST'])
-def predict():
-    if request.method == 'POST':
-        input_data = request.form.to_dict()
-        df_input = pd.DataFrame([input_data])
-        df_input['Year']  = int(df_input['Year'])
-        df_input['Month'] = int(df_input['Month'])
-        df_input['Day']   = int(df_input['Day'])
+print(f"Model Evaluation:\nMSE: {mse:.2f}\nR2 Score: {r2:.2f}")
 
-        # One-hot encode the data
-        df_encoded = pd.get_dummies(df_input)
-        for col in features:
-                if col not in df_encoded.columns:
-                    df_encoded[col] = 0  # Add the missing column with 0 value
-        df_encoded = df_encoded[features]  # Ensure column alignment
+# Save model and feature names
+joblib.dump(model, 'model/model.pkl')
+joblib.dump(list(X.columns), 'model/features.pkl')
 
-        # Predict
-        prediction = model.predict(df_encoded)[0]
-
-        # Load dataset
-        df = pd.read_csv('data/ev_sales_india.csv')
-        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
-        df['EV_Sales_Quantity'] = df['EV_Sales_Quantity'].fillna(df['EV_Sales_Quantity'].median())
-        df['State'] = df['State'].str.strip()
-
-        df_filtered = df[
-            (df['Vehicle_Class'] == input_data['Vehicle_Class']) &
-            (df['Vehicle_Category'] == input_data['Vehicle_Category']) &
-            (df['Vehicle_Type'] == input_data['Vehicle_Type'])
-        ].copy()
-
-        if df_filtered.empty:
-            df_filtered = df_input.copy()
-            df_filtered['EV_Sales_Quantity'] = prediction
-            df_filtered['Date'] = pd.to_datetime(df_input[['Year','Month','Day']])
-
-        if 'Month' not in df_filtered.columns:
-            df_filtered['Month'] = df_filtered['Date'].dt.month
-
-        # Generate graphs
-        generate_graphs(df_filtered)
-        graph_paths = {
-            'ev_sales_trend': 'graphs/ev_sales_trend.png',
-            'ev_sales_by_state': 'graphs/ev_sales_by_state.png',
-            'vehicle_type_distribution': 'graphs/vehicle_type_distribution.png',
-            'state_month_heatmap': 'graphs/state_month_heatmap.png'
-        }
-
-        return render_template(
-            'result.html',
-            prediction=round(prediction, 2),
-            graph_paths=graph_paths
-        )
-
-    return render_template(
-        'index.html',
-        states=dropdown_data['State'],
-        vehicle_classes=dropdown_data['Vehicle_Class'],
-        vehicle_categories=dropdown_data['Vehicle_Category'],
-        vehicle_types=dropdown_data['Vehicle_Type']
-    )
-
-@app.route('/index')
-def index():
-    return render_template('index.html')
-
-# ─── Main ───────────────────────────────────────────────────────────────────────
-if __name__ == '__main__':
-    app.run(debug=True)
+# Generate graphs dynamically from original dataframe
+generate_graphs(df_original)

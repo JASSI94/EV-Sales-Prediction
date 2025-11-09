@@ -1,79 +1,170 @@
-# 🚗 Electric Vehicle Sales Prediction
+import os
+import subprocess
+import time
+from threading import Thread
+from flask import (
+    Flask, render_template, request, redirect,
+    url_for, flash, Response
+)
+import pandas as pd
+import joblib
+from werkzeug.utils import secure_filename
+from graphs import generate_graphs
 
-## 🔹 Theme
-Welcome to the Electric Vehicle Sales Predictor repository! This project aims to forecast electric vehicle sales across Indian states using machine learning techniques. It provides interactive visualizations and a modern web user interface to enhance the user experience.
+# ─── Flask configuration ────────────────────────────────────────────────────────
+app = Flask(__name__)
+app.secret_key = 'supersecretkey'  # Secret key for session management
+app.config['UPLOAD_FOLDER'] = 'data/'
+ALLOWED_EXTENSIONS = {'csv'}
 
-Table of Contents:
-•Project Overview
-•Features
-•Technologies Used
-•Installation
-•Usage
-•Data Sources
-•Contributing
-•License
-•Contact
+# ─── Load model & dropdown data ─────────────────────────────────────────────────
+model         = joblib.load('model/model.pkl')
+features      = joblib.load('model/features.pkl')
+dropdown_data = joblib.load('model/dropdown_data.pkl')
 
-Project Overview:
-Electric vehicles (EVs) are gaining traction in India as the country moves towards sustainable transportation. This project utilizes machine learning algorithms to predict sales trends and patterns of electric vehicles across various states in India. The goal is to provide stakeholders with insights that can help in decision-making processes related to production, marketing, and policy-making.
+# ─── Global training progress tracker ───────────────────────────────────────────
+training_progress = {'percent': 0}
 
-The project features a user-friendly web interface built with Flask, allowing users to interact with the data and visualizations seamless.
+def allowed_file(filename):
+    return (
+        '.' in filename and
+        filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+    )
 
-Features:
-Sales Prediction: Predicts future sales of electric vehicles using historical data.
-Interactive Dashboard: Users can visualize data trends through charts and graphs.
-State-wise Analysis: Provides insights into sales performance across different Indian states.
-Machine Learning Models: Utilizes random forest and other algorithms for accurate predictions.
-Modern UI: A clean and intuitive interface for an enhanced user experience.
+# ─── Background training function ───────────────────────────────────────────────
+def train_background():
+    training_progress['percent'] = 0  # Reset progress
 
-Technologies Used:
-This project leverages various technologies and libraries:
+    proc = subprocess.Popen(
+        ['python', 'train_model.py'],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1
+    )
 
-Python: The main programming language for the backend.
-Flask: A lightweight web framework for building the web application.
-Matplotlib: Used for creating static, animated, and interactive visualizations.
-Pandas: For data manipulation and analysis.
-Scikit-learn: For implementing machine learning algorithms.
-HTML/CSS/JavaScript: For the frontend development.
-Jupyter Notebook: For prototyping and testing the machine learning models.
+    for line in proc.stdout:
+        print(line.strip())  # Log output
+        if line.startswith('PROGRESS:'):
+            try:
+                progress = int(line.strip().split(':')[1])
+                training_progress['percent'] = progress
+                print(f"Progress updated: {progress}%")  # Debug line
+            except ValueError:
+                pass
 
-Installation:
-To get started with the Electric Vehicle Sales Predictor, follow these steps:
+    proc.wait()
+    training_progress['percent'] = 100  # Complete
+    print("Training complete.")  # Debug line
 
-1. Clone the Repository:
-2. https://github.com/JASSI94/EV-Sales-Prediction
-2.Install Dependencies: Ensure you have Python installed. Then, create a virtual environment and install the required packages:
-python -m venv venv
-source venv/bin/activate  # On Windows use `venv\Scripts\activate`
-pip install -r requirements.txt
+# ─── Routes ─────────────────────────────────────────────────────────────────────
 
-3.Run the Application: Start the Flask server:
-python app.py
+@app.route('/')
+def root():
+    return redirect(url_for('dashboard'))
 
-Usage:
-Once the application is running, you can navigate through the dashboard to explore various features:
+@app.route('/dashboard', methods=['GET', 'POST'])
+def dashboard():
+    if request.method == 'POST':
+        # Handle file upload
+        if 'csv_file' in request.files and request.files['csv_file']:
+            file = request.files['csv_file']
+            if file and allowed_file(file.filename):
+                filename  = secure_filename(file.filename)
+                save_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+                file.save(save_path)
+                flash(f"📁 Uploaded '{filename}' successfully.", 'success')
+            else:
+                flash("❗ Please upload a valid .csv file.", 'danger')
+                return redirect(url_for('dashboard'))
 
-Sales Forecast: Enter relevant parameters to predict future sales.
-Data Visualization: View interactive charts that illustrate sales trends over time.
-State Analysis: Select a state to view specific sales data and insights.
-For the latest version, please visit the Releases section.
+        # Handle training trigger
+        if request.form.get('action') == 'train':
+            Thread(target=train_background, daemon=True).start()
+            flash("🚀 Training started! Watch progress below.", 'success')
 
-Data Sources:
-The data used in this project is sourced from various reliable platforms:
+    return render_template('dashboard.html', dropdown_data=dropdown_data)
 
-Government Reports: Official statistics on electric vehicle sales in India.
-Industry Publications: Market analysis reports that provide insights into EV trends.
-Open Data Portals: Public datasets that include sales figures and demographic information.
+@app.route('/train_progress')
+def train_progress():
+    def event_stream():
+        last_sent = -1
+        while True:
+            progress = training_progress.get('percent', 0)
+            if progress != last_sent:
+                last_sent = progress
+                yield f"data:{progress}\n\n"
+            if last_sent >= 100:
+                break
+            time.sleep(0.2)
+    return Response(event_stream(), mimetype='text/event-stream')
 
-Contributing:
-We welcome contributions to enhance this project. If you would like to contribute, please follow these steps:
+@app.route('/predict', methods=['GET', 'POST'])
+def predict():
+    if request.method == 'POST':
+        input_data = request.form.to_dict()
+        df_input = pd.DataFrame([input_data])
+        df_input['Year']  = int(df_input['Year'])
+        df_input['Month'] = int(df_input['Month'])
+        df_input['Day']   = int(df_input['Day'])
 
-Fork the repository.
-Create a new branch for your feature or bug fix.
-Make your changes and commit them.
-Push to your forked repository.
-Submit a pull request.
-Please ensure that your code follows the project's coding standards and includes appropriate tests.
+        # One-hot encode the data
+        df_encoded = pd.get_dummies(df_input)
+        for col in features:
+                if col not in df_encoded.columns:
+                    df_encoded[col] = 0  # Add the missing column with 0 value
+        df_encoded = df_encoded[features]  # Ensure column alignment
 
+        # Predict
+        prediction = model.predict(df_encoded)[0]
 
+        # Load dataset
+        df = pd.read_csv('data/ev_sales_india.csv')
+        df['Date'] = pd.to_datetime(df['Date'], errors='coerce')
+        df['EV_Sales_Quantity'] = df['EV_Sales_Quantity'].fillna(df['EV_Sales_Quantity'].median())
+        df['State'] = df['State'].str.strip()
 
+        df_filtered = df[
+            (df['Vehicle_Class'] == input_data['Vehicle_Class']) &
+            (df['Vehicle_Category'] == input_data['Vehicle_Category']) &
+            (df['Vehicle_Type'] == input_data['Vehicle_Type'])
+        ].copy()
+
+        if df_filtered.empty:
+            df_filtered = df_input.copy()
+            df_filtered['EV_Sales_Quantity'] = prediction
+            df_filtered['Date'] = pd.to_datetime(df_input[['Year','Month','Day']])
+
+        if 'Month' not in df_filtered.columns:
+            df_filtered['Month'] = df_filtered['Date'].dt.month
+
+        # Generate graphs
+        generate_graphs(df_filtered)
+        graph_paths = {
+            'ev_sales_trend': 'graphs/ev_sales_trend.png',
+            'ev_sales_by_state': 'graphs/ev_sales_by_state.png',
+            'vehicle_type_distribution': 'graphs/vehicle_type_distribution.png',
+            'state_month_heatmap': 'graphs/state_month_heatmap.png'
+        }
+
+        return render_template(
+            'result.html',
+            prediction=round(prediction, 2),
+            graph_paths=graph_paths
+        )
+
+    return render_template(
+        'index.html',
+        states=dropdown_data['State'],
+        vehicle_classes=dropdown_data['Vehicle_Class'],
+        vehicle_categories=dropdown_data['Vehicle_Category'],
+        vehicle_types=dropdown_data['Vehicle_Type']
+    )
+
+@app.route('/index')
+def index():
+    return render_template('index.html')
+
+# ─── Main ───────────────────────────────────────────────────────────────────────
+if __name__ == '__main__':
+    app.run(debug=True)

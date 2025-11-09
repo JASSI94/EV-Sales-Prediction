@@ -4,15 +4,15 @@
 Welcome to the Electric Vehicle Sales Predictor repository! This project aims to forecast electric vehicle sales across Indian states using machine learning techniques. It provides interactive visualizations and a modern web user interface to enhance the user experience.
 
 Table of Contents
-Project Overview
-Features
-Technologies Used
-Installation
-Usage
-Data Sources
-Contributing
-License
-Contact
+•Project Overview
+•Features
+•Technologies Used
+•Installation
+•Usage
+•Data Sources
+•Contributing
+•License
+•Contact
 
 Project Overview:
 Electric vehicles (EVs) are gaining traction in India as the country moves towards sustainable transportation. This project utilizes machine learning algorithms to predict sales trends and patterns of electric vehicles across various states in India. The goal is to provide stakeholders with insights that can help in decision-making processes related to production, marketing, and policy-making.

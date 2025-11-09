@@ -41,9 +41,7 @@ Installation:
 To get started with the Electric Vehicle Sales Predictor, follow these steps:
 
 1. Clone the Repository:
-git clone https://github.com/JASSI94/Electric_Vehicle_Sales_PredicTION.git
-cd Electric_Vehicle_Sales_Prediction
-
+2. https://github.com/JASSI94/EV-Sales-Prediction
 2.Install Dependencies: Ensure you have Python installed. Then, create a virtual environment and install the required packages:
 python -m venv venv
 source venv/bin/activate  # On Windows use `venv\Scripts\activate`
